@@ -1,0 +1,36 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment
+venv/
+.env
+
+# PyCharm
+.idea/
+*.iml
+
+# Logs
+*.log
+logs/
+
+# Dataset
+data/
+dataset/
+
+# Model weights
+*.pth
+*.pt
+*.h5
+
+# Tensorboard
+runs/
+tensorboard_logs/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
