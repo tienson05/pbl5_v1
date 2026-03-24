@@ -18,8 +18,10 @@ logs/
 # Dataset
 data/
 dataset/
+Tongji/
 
 # Model weights
+models/
 *.pth
 *.pt
 *.h5
@@ -34,3 +36,6 @@ tensorboard_logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# Storage
+storage/

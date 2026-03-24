@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from se_block import SEBlock
+from src.se_block import SEBlock
 
 
 class ResBlock(nn.Module):
