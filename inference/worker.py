@@ -1,5 +1,4 @@
 import json
-
 import cv2
 import torch
 import numpy as np
@@ -7,12 +6,10 @@ import os
 from PIL import Image
 from torchvision import transforms
 from .image_processing import CLAHETransform
-from .dao import connect_database, deactivate_active_sessions, add_session, get_available_locker, get_active_session
+from .dao import dao
 from .locker import send_locker
 from src.palm_net import PalmNet
 from .config import MODEL_PATH
-
-conn = connect_database()
 
 inference_transform = transforms.Compose([
     transforms.Resize((224, 224)),
@@ -55,13 +52,13 @@ def run_model(model, device, image_input):
     return embedding.cpu().numpy().flatten()
 
 def save_to_db(session_id, embedding):
-    lockers = get_available_locker(conn)
+    lockers = dao.get_available_locker()
     print("[WORKER] Available lockers: ", lockers)
     if not lockers:
         return None
     locker_id = lockers[0][0]
     embedding = embedding.tolist()
-    add_session(conn, session_id, locker_id, palm_hash=json.dumps(embedding))
+    dao.add_session(session_id, locker_id, palm_hash=json.dumps(embedding))
     return locker_id
 
 def cosine_similarity(a, b):
@@ -70,7 +67,7 @@ def cosine_similarity(a, b):
 def compare_embeddings(query_embedding):
     best_score = -1
     best_locker = None
-    mean_embeddings = get_active_session(conn)
+    mean_embeddings = dao.get_active_session()
 
     for item in mean_embeddings:
         emd = json.loads(item[2])
@@ -84,12 +81,12 @@ def compare_embeddings(query_embedding):
 
     if best_score < 0.8:
         return None, -1
-    if best_locker is not None:
-        deactivate_active_sessions(conn, best_locker)
+
     return best_locker, best_score
 
 
-def worker_loop(send_queue, take_queue):
+def worker_loop(send_queue, take_queue, ws_queue):
+    dao.connect_database()
     print("[WORKER] starting...")
     model, device = load_model()
     print("[WORKER] Ready")
@@ -98,7 +95,7 @@ def worker_loop(send_queue, take_queue):
     take_embeddings = []
 
     while True:
-        # ===== REGISTER (send) =====
+        # REGISTER (send)
         if not send_queue.empty():
             image_path = send_queue.get()
             if image_path is None:
@@ -123,7 +120,7 @@ def worker_loop(send_queue, take_queue):
                 print(f"[WORKER] Registered {session_id}")
                 print(session_embeddings)
 
-        # ===== VERIFY (take) =====
+        # VERIFY (take)
         if not take_queue.empty():
             image = take_queue.get()
             if image is None:
@@ -139,6 +136,13 @@ def worker_loop(send_queue, take_queue):
                 mean_embedding = mean_embedding / np.linalg.norm(mean_embedding)
                 lock_id, best_score = compare_embeddings(mean_embedding)
                 if lock_id is not None:
-                    send_locker(lock_id)
+                    ok = send_locker(lock_id)
+                    if ok:
+                        dao.deactivate_active_sessions(lock_id)
+                        ws_queue.put(1)
+                    else:
+                        ws_queue.put(0)
+                else:
+                    ws_queue.put(0)
                 print(f"[WORKER] Locker, Best_score: {lock_id}, {best_score}")
                 take_embeddings.clear()

@@ -6,9 +6,9 @@ from flask_sock import Sock
 import os
 import time
 import threading
-from typing import Optional
 from datetime import datetime
-from inference.dao import get_available_locker, connect_database, get_active_session
+from inference.dao import dao
+from inference.ws_manager import ws_manager
 from inference.image_processing import is_palm_open, is_palm_large_enough, crop_palm_roi
 from .detect import detect_hand
 from .worker import worker_loop
@@ -17,8 +17,7 @@ from multiprocessing import Process, Queue
 app = Flask(__name__)
 sock = Sock(app)
 
-# CONFIG
-conn = connect_database()
+#config
 UPLOAD_FOLDER = "storage"
 ALLOWED_COMMANDS = {"take", "send"}
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -27,14 +26,13 @@ mode = None
 TIMEOUT = 15  # giây
 start_time = None
 
-esp32_ws: Optional[any] = None
-ws_lock = threading.Lock()
-
 MAX_FRAMES = 5
 frame_queue = Queue(maxsize=30)
 send_queue = Queue(maxsize=30)
 take_queue = Queue(maxsize=30)
+ws_queue = Queue(maxsize=10)
 counter = 0
+take_counter = 0
 invalid_counter = 0
 MAX_TAKE_FRAMES = 2
 current_session_dir = None
@@ -57,16 +55,28 @@ def keyboard_loop():
         if cmd not in ALLOWED_COMMANDS:
             print("Invalid command")
             continue
-        with ws_lock:
-            if esp32_ws is None:
-                print("ESP32 not connected")
-                continue
-            if cmd == "send":
-                start_new_session()
-            esp32_ws.send(cmd)
-            global mode
-            mode = cmd
-            print(f"[KEYBOARD → ESP32] {cmd}")
+
+        if ws_manager.get() is None:
+            print("ESP32CAM not connected")
+            continue
+        if cmd == "send":
+            start_new_session()
+        ws_manager.send(cmd)
+        global mode
+        mode = cmd
+        print(f"[KEYBOARD → ESP32CAM] {cmd}")
+
+def ws_sender():
+    while True:
+        data = ws_queue.get()
+
+        ws = ws_manager.get()
+        if not ws:
+            continue
+
+        msg = "done" if data == 1 else "fail"
+        ws_manager.send(msg)
+        print(f"[WS_Sender] Sent: {msg}")
 
 def start_new_session():
     global current_session_dir, session_timestamp, counter
@@ -104,29 +114,29 @@ def http_command():
     cmd = request.args.get("command").strip().lower()
     if cmd not in ALLOWED_COMMANDS:
         return {"error": "invalid command"}, 400
-    with ws_lock:
-        if esp32_ws is None:
-            return {"error": "esp32 not connected"}, 503
-        if cmd == "send":
-            lockers = get_available_locker(conn)
-            if not lockers:
-                esp32_ws.send("full")
-                return {"locker": None}, 400
-            start_new_session()
-        if cmd == "take":
-            lockers = get_active_session(conn)
-            if not lockers:
-                esp32_ws.send("fail")
-                return {"locker": None}, 400
-        esp32_ws.send(cmd)
-        global mode
-        mode = cmd
-        start_time = time.time()
-        print(f"[HTTP → ESP32] {cmd}")
+
+    if ws_manager.get() is None:
+        return {"error": "ESP32CAM not connected"}, 503
+    if cmd == "send":
+        lockers = dao.get_available_locker()
+        if not lockers:
+            ws_manager.send("full")
+            return {"locker": None}, 400
+        start_new_session()
+    if cmd == "take":
+        lockers = dao.get_active_session()
+        if not lockers:
+            ws_manager.send("fail")
+            return {"locker": None}, 400
+    ws_manager.send(cmd)
+    global mode
+    mode = cmd
+    start_time = time.time()
+    print(f"[Server → ESP32CAM] {cmd}")
     return {"status": "ok"}
 
 def writer_worker():
-    global counter, current_session_dir, invalid_counter, start_time, mode
+    global counter, take_counter, current_session_dir, invalid_counter, start_time, mode
     while True:
         jpeg = frame_queue.get()
         np_arr = np.frombuffer(jpeg, np.uint8) # convert bytes -> numpy array
@@ -137,8 +147,8 @@ def writer_worker():
         current_time = time.time()
         if start_time is not None and (current_time - start_time) >= TIMEOUT:
             if invalid_counter > 30:
-                if esp32_ws:
-                    esp32_ws.send("fail")
+                if ws_manager.get() is not None:
+                    ws_manager.send("fail")
                 start_time = None
                 invalid_counter = 0
 
@@ -159,21 +169,21 @@ def writer_worker():
 
         if mode == "take":
             take_queue.put(roi)
-            counter += 1
-            if counter >= MAX_TAKE_FRAMES:
-                if esp32_ws:
-                    esp32_ws.send("done")
+            take_counter += 1
+            print(f"[TAKE]: received {take_counter} frames")
+            if take_counter >= MAX_TAKE_FRAMES:
+                if ws_manager.get() is not None:
+                    ws_manager.send("wait")
                 take_queue.put(None)
                 mode = None
                 print("[TAKE] Sent 'done' after 2 frames")
-                counter = 0
+                take_counter = 0
         elif mode == "send":
             if current_session_dir is None:
                 continue
 
-            with ws_lock:
-                counter += 1
-                filename = os.path.join(current_session_dir, f"img_{counter:02d}.jpg")
+            counter += 1
+            filename = os.path.join(current_session_dir, f"img_{counter:02d}.jpg")
 
             try:
                 cv2.imwrite(filename, roi)
@@ -182,24 +192,22 @@ def writer_worker():
             except Exception as e:
                 print(f"[WRITER] Error saving {filename}: {e}")
 
-            with ws_lock:
-                if counter >= MAX_FRAMES:
-                    if esp32_ws:
-                        esp32_ws.send("done")
-                        counter = 0
-                        print(f"[SESSION] Completed {current_session_dir}")
-                        current_session_dir = None
-                        print("[WRITER] Sent 'done' after 5 frames")
-                    send_queue.put(None)
-                    mode = None
+            if counter >= MAX_FRAMES:
+                if ws_manager.get() is not None:
+                    ws_manager.send("done")
+                    counter = 0
+                    print(f"[SESSION] Completed {current_session_dir}")
+                    current_session_dir = None
+                    print("[WRITER] Sent 'done' after 5 frames")
+                send_queue.put(None)
+                mode = None
 
 def reset_all_state(reason=""):
     """Reset tất cả state về ban đầu"""
     global frame_queue, send_queue, take_queue
 
     print(f"\n{'=' * 50}")
-    print(f"[RESET] Bắt đầu reset all state: {reason}")
-    print(f"{'=' * 50}")
+    print(f"Reason: {reason}")
 
     # Reset frame queue
     frame_dropped = 0
@@ -209,7 +217,7 @@ def reset_all_state(reason=""):
             frame_dropped += 1
     except Empty:
         pass
-    print(f"[RESET] ✓ Xóa {frame_dropped} frames trong queue")
+    print(f"Xóa {frame_dropped} frames trong queue")
 
     # Reset send queue
     send_dropped = 0
@@ -219,7 +227,7 @@ def reset_all_state(reason=""):
             send_dropped += 1
     except Empty:
         pass
-    print(f"[RESET] ✓ Xóa {send_dropped} items trong send queue")
+    print(f"Xóa {send_dropped} items trong send queue")
 
     # Reset take queue
     take_dropped = 0
@@ -229,26 +237,15 @@ def reset_all_state(reason=""):
             take_dropped += 1
     except Empty:
         pass
-    print(f"[RESET] ✓ Xóa {take_dropped} items trong take queue")
-    print(f"[RESET] ✓ Hoàn tất! Queue sizes: frame={frame_queue.qsize()}, "
-          f"send={send_queue.qsize()}, take={take_queue.qsize()}")
+    print(f"Xóa {take_dropped} items trong take queue")
+    print(f"Hoàn tất! Queue sizes: frame={frame_queue.qsize()}, "f"send={send_queue.qsize()}, take={take_queue.qsize()}")
     print(f"{'=' * 50}\n")
 
 @sock.route("/ws")
 def esp32_socket(ws):
-    global esp32_ws
-    with ws_lock:
-        if esp32_ws is not None and esp32_ws != ws:
-            print("[WS] Existing connection found → closing old one")
-            try:
-                esp32_ws.close(1000, "New connection arrived, closing old session")
-            except Exception as e:
-                print(f"[WS] Error closing old: {e}")
-            esp32_ws = None
-            reset_all_state("new connection")
+    ws_manager.set(ws)
 
-        esp32_ws = ws
-        print(f"[WS] ESP32 connected (new) | Queue size: {frame_queue.qsize()}")
+    print(f"[Server] ESP32 connected (new) | Queue size: {frame_queue.qsize()}")
 
     try:
         while True:
@@ -257,7 +254,7 @@ def esp32_socket(ws):
                 break
 
             if isinstance(data, str):
-                print(f"[ESP32 → TEXT] {data}")
+                print(f"[ESP32CAM → TEXT] {data}")
                 continue
 
             if isinstance(data, bytes):
@@ -267,32 +264,30 @@ def esp32_socket(ws):
                     try:
                         frame_queue.get_nowait()
                         dropped = True
-                        print("[WS] Queue full → dropped oldest frame")
+                        print("[Server] Queue full → dropped oldest frame")
                     except:
                         pass
                 frame_queue.put(jpeg)
-                print(f"[WS] Received JPEG: {len(jpeg)} bytes | Queue size: {frame_queue.qsize()}" +
-                      (" (dropped old)" if dropped else ""))
+                print(f"[Server] Received JPEG: {len(jpeg)} bytes | Queue size: {frame_queue.qsize()}" + (" (dropped old)" if dropped else ""))
             else:
                 print(f"[WS] Unknown data type: {type(data)}")
 
     except Exception as e:
         print(f"[WS] Error in receive loop: {e}")
-        reset_all_state(f"error: {str(e)}")
     finally:
-        with ws_lock:
-            if esp32_ws is ws:
-                esp32_ws = None
-        print("[WS] ESP32 disconnected")
+        ws_manager.clear(ws)
+        print("[Server] ESP32CAM disconnected")
         reset_all_state("client disconnected")
 
 if __name__ == "__main__":
-    worker = Process(target=worker_loop, args=(send_queue, take_queue,))
+    dao.connect_database()
+    worker = Process(target=worker_loop, args=(send_queue, take_queue, ws_queue,))
     worker.daemon = True
     worker.start()
     print("worker pid:", worker.pid)
 
     threading.Thread(target=keyboard_loop, daemon=True).start()
     threading.Thread(target=writer_worker, daemon=True).start()
+    threading.Thread(target=ws_sender, daemon=True).start()
     print("Server running on http://0.0.0.0:5000")
     app.run(host="0.0.0.0", port=5000, threaded=True, debug=False)
