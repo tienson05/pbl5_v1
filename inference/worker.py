@@ -1,4 +1,6 @@
 import json
+import time
+
 import cv2
 import torch
 import numpy as np
@@ -29,6 +31,7 @@ def load_model():
     return model, device
 
 def run_model(model, device, image_input):
+    s = time.time()
     # nếu là path thì đọc ảnh
     if isinstance(image_input, str):
         image = cv2.imread(image_input)
@@ -48,7 +51,7 @@ def run_model(model, device, image_input):
     # inference
     with torch.no_grad():
         embedding = model(image)
-
+    print(f"[Latency] Latency of model: {time.time() - s}")
     return embedding.cpu().numpy().flatten()
 
 def save_to_db(session_id, embedding):

@@ -41,7 +41,7 @@ session_timestamp = None
 """
 Save embeddings into database -> trừ trường hợp mất điện
 Sau 15 giây không chụp xong 5 ảnh thì send fall xuống esp32 cam (fail)
-Thay đổi trong file locker_manager trước khi chạy
+Thay đổi trong file locker.py trước khi chạy
 """
 
 def keyboard_loop():
@@ -139,6 +139,7 @@ def writer_worker():
     global counter, take_counter, current_session_dir, invalid_counter, start_time, mode
     while True:
         jpeg = frame_queue.get()
+        s = time.time()
         np_arr = np.frombuffer(jpeg, np.uint8) # convert bytes -> numpy array
         frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR) # decode jpeg -> BGR image
         ok, msg1, hand = detect_hand(frame) #ktra là bàn tay
@@ -164,7 +165,7 @@ def writer_worker():
             invalid_counter += 1
             continue
         roi = crop_palm_roi(frame, hand, roi_size=224)
-
+        print(f"[Latency] Latency on preprocessing: {time.time() - s}")
         invalid_counter = 0
 
         if mode == "take":
