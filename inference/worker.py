@@ -1,6 +1,6 @@
 import json
 import time
-
+from rich import print
 import cv2
 import torch
 import numpy as np
@@ -22,12 +22,12 @@ inference_transform = transforms.Compose([
 ])
 
 def load_model():
-    print("[WORKER] Loading model...")
+    print("[bold cyan][WORKER][/bold cyan] Loading model...")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = PalmNet().to(device)
     model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
     model.eval()
-    print("[WORKER] Model loaded")
+    print("[bold cyan][WORKER][/bold cyan] Model loaded")
     return model, device
 
 def run_model(model, device, image_input):
@@ -51,12 +51,12 @@ def run_model(model, device, image_input):
     # inference
     with torch.no_grad():
         embedding = model(image)
-    print(f"[Latency] Latency of model: {time.time() - s}")
+    print(f"[bold green][Latency][/bold green] Latency of model: {time.time() - s}")
     return embedding.cpu().numpy().flatten()
 
 def save_to_db(session_id, embedding):
     lockers = dao.get_available_locker()
-    print("[WORKER] Available lockers: ", lockers)
+    print("[bold cyan][WORKER][/bold cyan] Available lockers: ", lockers)
     if not lockers:
         return None
     locker_id = lockers[0][0]
@@ -90,9 +90,9 @@ def compare_embeddings(query_embedding):
 
 def worker_loop(send_queue, take_queue, ws_queue):
     dao.connect_database()
-    print("[WORKER] starting...")
+    print("[bold cyan][WORKER][/bold cyan] starting...")
     model, device = load_model()
-    print("[WORKER] Ready")
+    print("[bold cyan][WORKER][/bold cyan] Ready")
 
     session_embeddings = {}
     take_embeddings = []
@@ -118,9 +118,9 @@ def worker_loop(send_queue, take_queue, ws_queue):
                 mean_embedding = mean_embedding / np.linalg.norm(mean_embedding)
                 lock_id = save_to_db(session_id, mean_embedding)
                 send_locker(lock_id)
-                print(f"[WORKER] Lock: {lock_id}")
+                print(f"[bold cyan][WORKER][/bold cyan] Lock: {lock_id}")
                 del session_embeddings[session_id]
-                print(f"[WORKER] Registered {session_id}")
+                print(f"[bold cyan][WORKER][/bold cyan] Registered {session_id}")
                 print(session_embeddings)
 
         # VERIFY (take)
@@ -132,7 +132,7 @@ def worker_loop(send_queue, take_queue, ws_queue):
                 continue
             embedding = run_model(model, device, image)
             take_embeddings.append(embedding)
-            print(f"[WORKER] collected {len(take_embeddings)}/2 embeddings")
+            print(f"[bold cyan][WORKER][/bold cyan] collected {len(take_embeddings)}/2 embeddings")
             if len(take_embeddings) == 2:
                 embeddings = np.array(take_embeddings)
                 mean_embedding = embeddings.mean(axis=0)
@@ -147,5 +147,5 @@ def worker_loop(send_queue, take_queue, ws_queue):
                         ws_queue.put(0)
                 else:
                     ws_queue.put(0)
-                print(f"[WORKER] Locker, Best_score: {lock_id}, {best_score}")
+                print(f"[bold cyan][WORKER][/bold cyan] Locker, Best_score: {lock_id}, {best_score}")
                 take_embeddings.clear()

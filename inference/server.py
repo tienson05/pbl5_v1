@@ -13,6 +13,7 @@ from inference.image_processing import is_palm_open, is_palm_large_enough, crop_
 from .detect import detect_hand
 from .worker import worker_loop
 from multiprocessing import Process, Queue
+from rich import print
 
 app = Flask(__name__)
 sock = Sock(app)
@@ -76,7 +77,7 @@ def ws_sender():
 
         msg = "done" if data == 1 else "fail"
         ws_manager.send(msg)
-        print(f"[WS_Sender] Sent: {msg}")
+        print(f"[bold blue][WS_Sender][/bold blue] Sent: {msg}")
 
 def start_new_session():
     global current_session_dir, session_timestamp, counter
@@ -135,7 +136,7 @@ def http_command():
     print(f"[Server → ESP32CAM] {cmd}")
     return {"status": "ok"}
 
-def writer_worker():
+def preprocessing_worker():
     global counter, take_counter, current_session_dir, invalid_counter, start_time, mode
     while True:
         jpeg = frame_queue.get()
@@ -165,19 +166,19 @@ def writer_worker():
             invalid_counter += 1
             continue
         roi = crop_palm_roi(frame, hand, roi_size=224)
-        print(f"[Latency] Latency on preprocessing: {time.time() - s}")
+        print(f"[bold green][Latency][/bold green] Latency on preprocessing: {time.time() - s}")
         invalid_counter = 0
 
         if mode == "take":
             take_queue.put(roi)
             take_counter += 1
-            print(f"[TAKE]: received {take_counter} frames")
+            print(f"[bold magenta][P_WORKER][/bold magenta]: received {take_counter} frames")
             if take_counter >= MAX_TAKE_FRAMES:
                 if ws_manager.get() is not None:
                     ws_manager.send("wait")
                 take_queue.put(None)
                 mode = None
-                print("[TAKE] Sent 'done' after 2 frames")
+                print("[bold magenta][P_WORKER][/bold magenta] Sent 'done' after 2 frames")
                 take_counter = 0
         elif mode == "send":
             if current_session_dir is None:
@@ -189,17 +190,17 @@ def writer_worker():
             try:
                 cv2.imwrite(filename, roi)
                 send_queue.put(filename) # cân nhắc put roi như take luôn
-                print(f"[WRITER] Saved {filename} ({len(roi)} bytes)")
+                print(f"[bold magenta][P_WORKER][/bold magenta] Saved {filename} ({len(roi)} bytes)")
             except Exception as e:
-                print(f"[WRITER] Error saving {filename}: {e}")
+                print(f"[bold magenta][P_WORKER][/bold magenta] Error saving {filename}: {e}")
 
             if counter >= MAX_FRAMES:
                 if ws_manager.get() is not None:
                     ws_manager.send("done")
                     counter = 0
-                    print(f"[SESSION] Completed {current_session_dir}")
+                    print(f"[bold magenta][P_WORKER][/bold magenta] Completed {current_session_dir}")
                     current_session_dir = None
-                    print("[WRITER] Sent 'done' after 5 frames")
+                    print("[bold magenta][P_WORKER][/bold magenta] Sent 'done' after 5 frames")
                 send_queue.put(None)
                 mode = None
 
@@ -208,7 +209,7 @@ def reset_all_state(reason=""):
     global frame_queue, send_queue, take_queue
 
     print(f"\n{'=' * 50}")
-    print(f"Reason: {reason}")
+    print(f"[bold yellow][SERVER][/bold yellow] Reason: {reason}")
 
     # Reset frame queue
     frame_dropped = 0
@@ -218,7 +219,7 @@ def reset_all_state(reason=""):
             frame_dropped += 1
     except Empty:
         pass
-    print(f"Xóa {frame_dropped} frames trong queue")
+    print(f"[bold yellow][SERVER][/bold yellow] Xóa {frame_dropped} frames trong queue")
 
     # Reset send queue
     send_dropped = 0
@@ -228,7 +229,7 @@ def reset_all_state(reason=""):
             send_dropped += 1
     except Empty:
         pass
-    print(f"Xóa {send_dropped} items trong send queue")
+    print(f"[bold yellow][SERVER][/bold yellow] Xóa {send_dropped} items trong send queue")
 
     # Reset take queue
     take_dropped = 0
@@ -238,15 +239,15 @@ def reset_all_state(reason=""):
             take_dropped += 1
     except Empty:
         pass
-    print(f"Xóa {take_dropped} items trong take queue")
-    print(f"Hoàn tất! Queue sizes: frame={frame_queue.qsize()}, "f"send={send_queue.qsize()}, take={take_queue.qsize()}")
+    print(f"[bold yellow][SERVER][/bold yellow] Xóa {take_dropped} items trong take queue")
+    print(f"[bold yellow][SERVER][/bold yellow] Hoàn tất! Queue sizes: frame={frame_queue.qsize()}, "f"send={send_queue.qsize()}, take={take_queue.qsize()}")
     print(f"{'=' * 50}\n")
 
 @sock.route("/ws")
 def esp32_socket(ws):
     ws_manager.set(ws)
 
-    print(f"[Server] ESP32 connected (new) | Queue size: {frame_queue.qsize()}")
+    print(f"[bold yellow][SERVER][/bold yellow] ESP32 connected (new) | Queue size: {frame_queue.qsize()}")
 
     try:
         while True:
@@ -265,19 +266,19 @@ def esp32_socket(ws):
                     try:
                         frame_queue.get_nowait()
                         dropped = True
-                        print("[Server] Queue full → dropped oldest frame")
+                        print("[bold yellow][SERVER][/bold yellow] Queue full → dropped oldest frame")
                     except:
                         pass
                 frame_queue.put(jpeg)
-                print(f"[Server] Received JPEG: {len(jpeg)} bytes | Queue size: {frame_queue.qsize()}" + (" (dropped old)" if dropped else ""))
+                print(f"[bold yellow][SERVER][/bold yellow] Received JPEG: {len(jpeg)} bytes | Queue size: {frame_queue.qsize()}" + (" (dropped old)" if dropped else ""))
             else:
-                print(f"[WS] Unknown data type: {type(data)}")
+                print(f"[bold yellow][SERVER][/bold yellow] Unknown data type: {type(data)}")
 
     except Exception as e:
-        print(f"[WS] Error in receive loop: {e}")
+        print(f"[bold yellow][SERVER][/bold yellow] Error in receive loop: {e}")
     finally:
         ws_manager.clear(ws)
-        print("[Server] ESP32CAM disconnected")
+        print("[bold yellow][SERVER][/bold yellow] ESP32CAM disconnected")
         reset_all_state("client disconnected")
 
 if __name__ == "__main__":
@@ -285,10 +286,9 @@ if __name__ == "__main__":
     worker = Process(target=worker_loop, args=(send_queue, take_queue, ws_queue,))
     worker.daemon = True
     worker.start()
-    print("worker pid:", worker.pid)
 
     threading.Thread(target=keyboard_loop, daemon=True).start()
-    threading.Thread(target=writer_worker, daemon=True).start()
+    threading.Thread(target=preprocessing_worker, daemon=True).start()
     threading.Thread(target=ws_sender, daemon=True).start()
     print("Server running on http://0.0.0.0:5000")
     app.run(host="0.0.0.0", port=5000, threaded=True, debug=False)
